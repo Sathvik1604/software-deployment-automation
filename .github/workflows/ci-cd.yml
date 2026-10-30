@@ -1,0 +1,163 @@
+name: C++ Software Deployment Automation CI/CD
+
+# Trigger on push to main and pull requests targeting main
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build-test-deploy:
+    name: Build, Test, Package, and Report
+    runs-on: ubuntu-latest
+
+    steps:
+      # ========================================================================
+      # Stage 1: Checkout Source Code
+      # ========================================================================
+      - name: Stage 1 - Checkout Source Code
+        id: checkout
+        uses: actions/checkout@v4
+
+      # ========================================================================
+      # Stage 2: Environment Verification & Setup
+      # ========================================================================
+      - name: Stage 2 - Environment Setup
+        id: setup_env
+        run: |
+          echo "=== System & Toolchain Diagnostics ==="
+          uname -a
+          echo "--- Checking C++ Compiler ---"
+          g++ --version || clang++ --version
+          echo "--- Checking CMake & CTest ---"
+          cmake --version
+          ctest --version
+          echo "--- Checking Python Runtime ---"
+          python3 --version
+          echo "Environment validation completed successfully."
+
+      # ========================================================================
+      # Stage 3: C++ Compilation (CMake & C++17)
+      # ========================================================================
+      - name: Stage 3 - C++ Compilation
+        id: compile
+        run: |
+          echo "=== Configuring C++ Project with CMake ==="
+          cmake -B build -S . -DCMAKE_BUILD_TYPE=Release 2>&1 | tee build-logs.txt
+          
+          echo "=== Building Targets (calculator & test_calculator) ==="
+          cmake --build build --config Release 2>&1 | tee -a build-logs.txt
+          
+          echo "Build finished with exit code $?"
+
+      # ========================================================================
+      # Stage 4: Automated Testing (CTest)
+      # ========================================================================
+      - name: Stage 4 - Automated Testing
+        id: test
+        run: |
+          echo "=== Executing CTest Automated Test Suite ==="
+          ctest --test-dir build --output-on-failure 2>&1 | tee test-results.txt
+          TEST_EXIT_CODE=$?
+          
+          echo "--- Direct Test Executable Run ---"
+          ./build/test_calculator 2>&1 | tee -a test-results.txt
+          
+          if [ $TEST_EXIT_CODE -ne 0 ]; then
+            echo "[ERROR] Automated test suite failed."
+            exit $TEST_EXIT_CODE
+          fi
+
+      # ========================================================================
+      # Stage 5: Docker Packaging (Push to main only)
+      # ========================================================================
+      - name: Stage 5 - Docker Packaging
+        id: docker_build
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          echo "=== Building Docker Image ==="
+          docker build -t cpp-calculator:latest . 2>&1 | tee docker-build-logs.txt
+          echo "Docker image built successfully."
+
+      # ========================================================================
+      # Stage 6: Container Execution & Verification (Push to main only)
+      # ========================================================================
+      - name: Stage 6 - Container Execution
+        id: container_exec
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          echo "=== Running Docker Container with Deterministic Verification ==="
+          docker run --rm cpp-calculator:latest 2>&1 | tee container-output.txt
+          CONTAINER_EXIT_CODE=$?
+          
+          if [ $CONTAINER_EXIT_CODE -ne 0 ]; then
+            echo "[ERROR] Docker container execution failed with code $CONTAINER_EXIT_CODE."
+            exit $CONTAINER_EXIT_CODE
+          fi
+          echo "Container verified successfully."
+
+      # ========================================================================
+      # Stage 7: Workflow Report Generation (Always runs to capture status)
+      # ========================================================================
+      - name: Stage 7 - Workflow Report Generation
+        id: generate_report
+        if: always()
+        env:
+          PROJECT_NAME: "C++ Software Deployment Automation with Workflow Reporting"
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+          GITHUB_SHA: ${{ github.sha }}
+          GIT_COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          GITHUB_RUN_NUMBER: ${{ github.run_number }}
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          STEP_COMPILE_STATUS: ${{ steps.compile.outcome }}
+          STEP_TEST_STATUS: ${{ steps.test.outcome }}
+          STEP_DOCKER_BUILD_STATUS: ${{ steps.docker_build.outcome }}
+          STEP_CONTAINER_EXEC_STATUS: ${{ steps.container_exec.outcome }}
+          STEP_CHECKOUT_STATUS: ${{ steps.checkout.outcome }}
+          STEP_SETUP_STATUS: ${{ steps.setup_env.outcome }}
+        run: |
+          echo "=== Generating Machine & Human Readable Reports ==="
+          python3 scripts/generate_report.py
+          
+          echo "--- Preview Generated workflow-report.json ---"
+          cat workflow-report.json
+          
+          echo "--- Step Summary for GitHub Actions Web UI ---"
+          cat workflow-report.md >> $GITHUB_STEP_SUMMARY
+
+      # ========================================================================
+      # Stage 8: Upload Downloadable Artifacts (Always runs)
+      # ========================================================================
+      - name: Stage 8 - Upload Workflow Artifact
+        id: upload_artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: robot-workflow-report
+          path: |
+            workflow-report.json
+            workflow-report.md
+            test-results.txt
+            build-logs.txt
+            docker-build-logs.txt
+            container-output.txt
+          if-no-files-found: warn
+
+      # ========================================================================
+      # Pipeline Outcome Enforcement
+      # Ensures earlier failure is never masked by the reporting steps
+      # ========================================================================
+      - name: Enforce Final Pipeline Outcome
+        if: |
+          always() && (
+            steps.compile.outcome == 'failure' ||
+            steps.test.outcome == 'failure' ||
+            steps.docker_build.outcome == 'failure' ||
+            steps.container_exec.outcome == 'failure'
+          )
+        run: |
+          echo "[FAIL] One or more critical pipeline stages failed. Failing job status."
+          exit 1
