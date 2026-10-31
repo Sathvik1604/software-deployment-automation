@@ -52,22 +52,33 @@ jobs:
           echo "Build finished with exit code $?"
 
       # ========================================================================
+      
       # Stage 4: Automated Testing (CTest)
       # ========================================================================
       - name: Stage 4 - Automated Testing
         id: test
         run: |
           echo "=== Executing CTest Automated Test Suite ==="
+
+          set +e
+          set -o pipefail
+
           ctest --test-dir build --output-on-failure 2>&1 | tee test-results.txt
           TEST_EXIT_CODE=$?
-          
+
           echo "--- Direct Test Executable Run ---"
           ./build/test_calculator 2>&1 | tee -a test-results.txt
-          
-          if [ $TEST_EXIT_CODE -ne 0 ]; then
+          DIRECT_TEST_EXIT_CODE=$?
+
+          set -e
+
+          if [ $TEST_EXIT_CODE -ne 0 ] || [ $DIRECT_TEST_EXIT_CODE -ne 0 ]; then
             echo "[ERROR] Automated test suite failed."
-            exit $TEST_EXIT_CODE
+            exit 1
           fi
+
+          echo "[SUCCESS] All automated tests passed."
+
 
       # ========================================================================
       # Stage 5: Docker Packaging (Push to main only)
